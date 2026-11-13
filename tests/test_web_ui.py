@@ -219,7 +219,7 @@ def test_list_products_without_plan(tmp_path):
 def test_http_end_to_end(server):
     _srv, base = server
     status, body, headers = call(base + "/")
-    assert status == 200 and "Agent 工坊".encode() in body and "text/html" in headers["Content-Type"]
+    assert status == 200 and "<title>灵犀 · 让灵感成形</title>".encode() in body and "text/html" in headers["Content-Type"]
     script = re.search(rb'src="(/static/assets/[^"]+\.js)"', body).group(1).decode()
     status, _, headers = call(base + script)
     assert status == 200 and "javascript" in headers["Content-Type"]
