@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -78,13 +79,56 @@ def prepare(repo: Path, upstream_url: str = UPSTREAM_URL) -> dict:
     return state
 
 
-def publish(repo: Path, destination_url: str = DESTINATION_URL, env: dict | None = None) -> str:
+def package_candidate(repo: Path, output_dir: Path) -> None:
+    require_clean(repo)
     path = state_path(repo)
     if not path.is_file():
-        raise SyncStopped("No prepared candidate; run prepare and all validation steps first.")
+        raise SyncStopped("No prepared candidate to package.")
     state = json.loads(path.read_text(encoding="utf-8"))
+    state["candidate"] = git(repo, "rev-parse", "HEAD").stdout.strip()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    # Only Git objects are transferred. No working-tree scripts are executed by
+    # the publishing job, and the trusted base already exists in its checkout.
+    git(repo, "bundle", "create", str(output_dir / "candidate.bundle"), "HEAD", "^" + state["base"])
+    (output_dir / "manifest.json").write_text(json.dumps(state), encoding="utf-8")
+
+
+def read_candidate(repo: Path, artifact_dir: Path, upstream_url: str = UPSTREAM_URL) -> dict:
     require_clean(repo)
-    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    manifest = artifact_dir / "manifest.json"
+    bundle = artifact_dir / "candidate.bundle"
+    if any(p.is_symlink() or not p.is_file() for p in (manifest, bundle)):
+        raise SyncStopped("Missing or invalid candidate artifact.")
+    if manifest.stat().st_size > 4096:
+        raise SyncStopped("Invalid candidate manifest size.")
+    state = json.loads(manifest.read_text(encoding="utf-8"))
+    if not isinstance(state, dict) or any(
+        not isinstance(state.get(key), str) or not re.fullmatch(r"[0-9a-f]{40}", state[key])
+        for key in ("base", "upstream", "candidate")
+    ):
+        raise SyncStopped("Candidate manifest must contain exact Git commit IDs.")
+    if state["base"] != git(repo, "rev-parse", "HEAD").stdout.strip():
+        raise SyncStopped("Candidate base differs from the trusted workflow checkout.")
+    git(repo, "bundle", "verify", str(bundle))
+    git(repo, "fetch", "--no-tags", "--no-recurse-submodules", str(bundle), "HEAD:refs/lingxi/sync-candidate")
+    if git(repo, "rev-parse", "refs/lingxi/sync-candidate").stdout.strip() != state["candidate"]:
+        raise SyncStopped("Bundle head does not match the candidate manifest.")
+    git(repo, "fetch", "--no-tags", "--no-recurse-submodules", upstream_url, "refs/heads/main")
+    if not ancestor(repo, state["upstream"], "FETCH_HEAD"):
+        raise SyncStopped("Candidate upstream revision is not in the current upstream main history.")
+    return state
+
+
+def publish(repo: Path, destination_url: str = DESTINATION_URL, env: dict | None = None,
+            state: dict | None = None) -> str:
+    path = state_path(repo)
+    from_local_state = state is None
+    if state is None:
+        if not path.is_file():
+            raise SyncStopped("No prepared candidate; run prepare and all validation steps first.")
+        state = json.loads(path.read_text(encoding="utf-8"))
+    require_clean(repo)
+    head = state.get("candidate") or git(repo, "rev-parse", "HEAD").stdout.strip()
     if not ancestor(repo, state["base"], head) or not ancestor(repo, state["upstream"], head):
         raise SyncStopped("Candidate no longer preserves both Lingxi and upstream history.")
     require_reviewed_automation(repo, state["base"], head)
@@ -94,14 +138,16 @@ def publish(repo: Path, destination_url: str = DESTINATION_URL, env: dict | None
     # No force option: a concurrent push after the check is rejected by Git too.
     git(repo, "-c", "credential.helper=", "-c",
         'credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f',
-        "push", destination_url, "HEAD:refs/heads/main", env=env)
-    path.unlink()
+        "push", destination_url, f"{head}:refs/heads/main", env=env)
+    if from_local_state:
+        path.unlink()
     return head
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=("prepare", "publish"))
+    parser.add_argument("operation", choices=("prepare", "bundle", "publish"))
+    parser.add_argument("--artifact-dir", type=Path)
     args = parser.parse_args()
     if os.getenv("GITHUB_REPOSITORY") != "buu206/lingxi" or os.getenv("GITHUB_REF") != "refs/heads/main":
         parser.error("Automatic synchronization is restricted to buu206/lingxi on main.")
@@ -113,10 +159,18 @@ def main() -> int:
                 with open(output, "a", encoding="utf-8") as stream:
                     stream.write(f"changed={str(state['changed']).lower()}\n")
             message = f"Prepared upstream `{state['upstream'][:12]}` for validation." if state["changed"] else "Already up to date with upstream; no changes published."
+        elif args.operation == "bundle":
+            if args.artifact_dir is None:
+                parser.error("bundle requires --artifact-dir")
+            package_candidate(repo, args.artifact_dir.resolve())
+            message = "Packaged the validated candidate for the isolated publishing job."
         else:
             if not os.getenv("GH_TOKEN"):
                 raise SyncStopped("The publish step requires GITHUB_TOKEN via GH_TOKEN.")
-            message = f"Published validated upstream update: `{publish(repo)}`."
+            if args.artifact_dir is None:
+                parser.error("publish requires --artifact-dir from the validation job")
+            candidate = read_candidate(repo, args.artifact_dir.resolve())
+            message = f"Published validated upstream update: `{publish(repo, state=candidate)}`."
         print(message)
         if summary := os.getenv("GITHUB_STEP_SUMMARY"):
             with open(summary, "a", encoding="utf-8") as stream:

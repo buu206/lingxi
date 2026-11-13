@@ -1,10 +1,11 @@
 """Exercise real Git merges and publication against isolated local repositories."""
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from tools.sync_upstream import SyncStopped, prepare, publish, state_path
+from tools.sync_upstream import SyncStopped, package_candidate, prepare, publish, read_candidate, state_path
 
 
 def git(repo: Path, *args: str) -> str:
@@ -141,3 +142,64 @@ def test_older_prepared_state_is_invalidated_before_new_attempt(repos):
     assert state_path(local).exists()
     assert prepare(local, str(upstream))["changed"] is False
     assert not state_path(local).exists()
+
+
+def test_bundle_publishes_from_trusted_checkout_without_executing_candidate(repos, tmp_path):
+    upstream, local, remote = repos
+    trusted = tmp_path / "trusted-publisher"
+    git(tmp_path, "clone", str(remote), str(trusted))
+    base = git(trusted, "rev-parse", "HEAD")
+    commit(upstream, "engine.txt", "upstream update to validate\n")
+    prepare(local, str(upstream))
+    commit(local, "blueprint/web/static/index.html", "rebuilt blue UI\n")
+    artifact = tmp_path / "artifact"
+    package_candidate(local, artifact)
+    state = read_candidate(trusted, artifact, str(upstream))
+    assert git(trusted, "rev-parse", "HEAD") == base
+    assert (trusted / "engine.txt").read_text() == "original engine\n"
+    result = publish(trusted, str(remote), state=state)
+    assert git(remote, "rev-parse", "main") == result
+    assert result == git(local, "rev-parse", "HEAD")
+    assert git(trusted, "rev-parse", "HEAD") == base
+
+
+@pytest.mark.parametrize("key,value,error", [
+    ("base", "0" * 40, "trusted workflow checkout"),
+    ("candidate", "0" * 40, "Bundle head"),
+    ("upstream", "--upload-pack=untrusted", "exact Git commit IDs"),
+])
+def test_candidate_artifact_validation(repos, tmp_path, key, value, error):
+    upstream, local, remote = repos
+    trusted = tmp_path / "trusted-publisher"
+    git(tmp_path, "clone", str(remote), str(trusted))
+    before = git(remote, "rev-parse", "main")
+    commit(upstream, "engine.txt", "upstream update\n")
+    prepare(local, str(upstream))
+    artifact = tmp_path / "artifact"
+    package_candidate(local, artifact)
+    manifest = artifact / "manifest.json"
+    state = json.loads(manifest.read_text())
+    state[key] = value
+    manifest.write_text(json.dumps(state))
+    with pytest.raises(SyncStopped, match=error):
+        read_candidate(trusted, artifact, str(upstream))
+    assert git(remote, "rev-parse", "main") == before
+
+
+def test_workflow_isolates_write_token_from_upstream_code():
+    import yaml
+    workflow = Path(__file__).resolve().parents[1] / ".github/workflows/sync-upstream.yml"
+    doc = yaml.load(workflow.read_text(), Loader=yaml.BaseLoader)
+    assert doc["permissions"] == {"contents": "read"}
+    assert "workflow_dispatch" in doc["on"] and "schedule" in doc["on"]
+    validation = doc["jobs"]["validate"]
+    assert "permissions" not in validation
+    assert all("GH_TOKEN" not in step.get("env", {}) for step in validation["steps"])
+    publisher = doc["jobs"]["publish"]
+    assert publisher["needs"] == "validate"
+    assert publisher["permissions"] == {"contents": "write"}
+    assert publisher["steps"][0]["with"]["ref"] == "${{ github.sha }}"
+    assert publisher["steps"][0]["with"]["persist-credentials"] == "false"
+    commands = [step["run"] for step in publisher["steps"] if "run" in step]
+    assert len(commands) == 1 and "sync_upstream.py publish" in commands[0]
+    assert commands[0].startswith("python3 -I ")

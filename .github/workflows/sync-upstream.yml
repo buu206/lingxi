@@ -7,23 +7,25 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: lingxi-upstream-sync
   cancel-in-progress: false
 
 jobs:
-  sync:
+  validate:
     if: github.repository == 'buu206/lingxi' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    outputs:
+      changed: ${{ steps.merge.outputs.changed }}
     steps:
       - name: Check out Lingxi main
         # actions/checkout@v6
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 
@@ -34,7 +36,7 @@ jobs:
 
       - name: Merge upstream candidate
         id: merge
-        run: python3 tools/sync_upstream.py prepare
+        run: python3 -I tools/sync_upstream.py prepare
 
       - name: Set up Python
         if: steps.merge.outputs.changed == 'true'
@@ -77,13 +79,50 @@ jobs:
 
       # GITHUB_TOKEN pushes do not trigger the ordinary Test workflow. The
       # build, tests and offline evaluations above must all pass before this.
-      - name: Publish only the validated candidate
+      - name: Package validated Git objects
         if: steps.merge.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: python tools/sync_upstream.py publish
+        run: python -I tools/sync_upstream.py bundle --artifact-dir "$RUNNER_TEMP/upstream-candidate"
+
+      - name: Transfer candidate to publishing job
+        if: steps.merge.outputs.changed == 'true'
+        # actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: upstream-candidate
+          path: ${{ runner.temp }}/upstream-candidate/
+          retention-days: 1
+          if-no-files-found: error
 
       - name: Explain a stopped sync
         if: failure()
         run: |
           echo 'Automatic sync stopped. Inspect the failed step, resolve any conflict or failed check, then rerun. No force-push is used.' >> "$GITHUB_STEP_SUMMARY"
+
+  publish:
+    needs: validate
+    if: needs.validate.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the trusted workflow revision
+        # No code from the candidate bundle is checked out or executed here.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download validated candidate
+        # actions/download-artifact@v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: upstream-candidate
+          path: ${{ runner.temp }}/upstream-candidate/
+
+      - name: Verify and publish without executing candidate code
+        env:
+          GH_TOKEN: ${{ github.token }}
+        # Isolated mode prevents repository modules from shadowing stdlib imports.
+        run: python3 -I tools/sync_upstream.py publish --artifact-dir "$RUNNER_TEMP/upstream-candidate"
