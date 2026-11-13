@@ -73,6 +73,14 @@ npm run build
 
 ## 来源与许可
 
-本项目 Fork 自 [hubooooooo/agent-workshop](https://github.com/hubooooooo/agent-workshop)，保留原始 Git 历史和 [MIT 许可证](LICENSE)，原项目版权为 **Copyright (c) 2024 Hubo**。
+本项目基于 [hubooooooo/agent-workshop](https://github.com/hubooooooo/agent-workshop) 定制开发，保留原始 Git 历史和 [MIT 许可证](LICENSE)，原项目版权为 **Copyright (c) 2024 Hubo**。
 
 灵犀定制部分由 [buu206](https://github.com/buu206) 维护，主要涉及网页产品体验与视觉设计。云朵品牌素材使用内置图像生成工具生成，[生成提示词](web/src/assets/brand/lingxi-cloud.prompt.txt) 随源码保存。
+
+## 上游自动同步
+
+[Sync upstream](https://github.com/buu206/lingxi/actions/workflows/sync-upstream.yml) 每天北京时间 **09:23** 检查原项目的 `main` 分支，也可以在该页面点击 **Run workflow** 手动运行。
+
+有新提交时，先合并到临时工作区，重新构建前端、运行 Python 测试和离线评测，全部通过后才更新灵犀的 `main`。合并会保留灵犀已有提交；冲突、检查失败、验证期间有人更新 `main`，或上游修改工作流、Git 合并配置、同步脚本时，本轮停止并在 Actions 中记录原因，不会强制覆盖仓库。
+
+自动同步更新的是 GitHub 仓库。本机运行的版本需要自行拉取代码并按需重启。GitHub 定时执行可能延迟；公共仓库连续 60 天无活动时，定时工作流可能被自动停用，可在 Actions 中重新启用。详见 [GitHub 定时工作流说明](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule)。

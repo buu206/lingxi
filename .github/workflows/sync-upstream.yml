@@ -1,0 +1,89 @@
+name: Sync upstream
+
+on:
+  schedule:
+    # 09:23 Asia/Shanghai, daily. GitHub may delay scheduled runs.
+    - cron: '23 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lingxi-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'buu206/lingxi' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out Lingxi main
+        # actions/checkout@v6
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Configure sync author
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Merge upstream candidate
+        id: merge
+        run: python3 tools/sync_upstream.py prepare
+
+      - name: Set up Python
+        if: steps.merge.outputs.changed == 'true'
+        # actions/setup-python@v6
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node
+        if: steps.merge.outputs.changed == 'true'
+        # actions/setup-node@v6.5.0
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '22'
+
+      - name: Install Python dependencies
+        if: steps.merge.outputs.changed == 'true'
+        run: python -m pip install -r requirements.txt
+
+      - name: Rebuild the merged frontend
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Record rebuilt web assets
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          git add --all -- blueprint/web/static
+          if ! git diff --cached --quiet; then
+            git -c core.hooksPath=/dev/null commit -m 'build: refresh web assets after upstream sync'
+          fi
+
+      - name: Run Python tests and offline evaluations
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          python -m pytest tests -q
+          python -m blueprint eval
+
+      # GITHUB_TOKEN pushes do not trigger the ordinary Test workflow. The
+      # build, tests and offline evaluations above must all pass before this.
+      - name: Publish only the validated candidate
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/sync_upstream.py publish
+
+      - name: Explain a stopped sync
+        if: failure()
+        run: |
+          echo 'Automatic sync stopped. Inspect the failed step, resolve any conflict or failed check, then rerun. No force-push is used.' >> "$GITHUB_STEP_SUMMARY"
