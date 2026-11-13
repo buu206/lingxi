@@ -4,6 +4,7 @@ import { Callout, Screen, ScrollBody, TopBar, useSettings } from "@/components/c
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api } from "@/lib/api"
+import { hasPendingIntakeDraft } from "@/lib/intake-draft"
 import { cn } from "@/lib/utils"
 
 export function SettingsPage() {
@@ -52,16 +53,18 @@ export function SettingsPage() {
     <Screen>
       <TopBar title="模型设置" />
       <ScrollBody className="max-w-2xl">
-        <p className="mb-6 text-sm text-muted-foreground">
-          引擎靠大模型对话和推导方案。一份方案约 5–7 次调用、2.5–4 万 tokens；每次推导最多 40 次调用、150 万 tokens，超了会自动停下，不会无限扣费。
-        </p>
+        <div className="settings-intro">
+          <h1>为灵感，连接一份智能。</h1>
+          <p>选择你使用的模型服务，灵犀就能陪你梳理需求、推导方案。配置保存在这台电脑上。</p>
+        </div>
+        {hasPendingIntakeDraft() && <div className="settings-return"><span>{settings.configured ? "模型已就绪，你的想法还在等你。" : "你的想法已保留，连接后就能继续。"}</span><a href="#/new">继续我的想法 →</a></div>}
         {settings.mock && (
           <Callout tone="warn" title="离线演示模式">
             当前不调用模型。这里保存的配置会写进本机 .env，下次正常启动时生效。
           </Callout>
         )}
 
-        <form onSubmit={submit} className="space-y-6">
+        <form onSubmit={submit} className="workshop-settings-form space-y-6">
           <section>
             <div className="mb-3 text-sm font-medium">模型服务商</div>
             <div className="grid gap-2 sm:grid-cols-3">
@@ -71,8 +74,8 @@ export function SettingsPage() {
                   key={p.key}
                   onClick={() => choose(p.key)}
                   className={cn(
-                    "rounded-lg border px-3 py-2.5 text-left text-sm transition-colors",
-                    provider === p.key ? "border-foreground bg-card" : "hover:bg-muted/60",
+                    "provider-option rounded-lg border px-3 py-2.5 text-left text-sm transition-colors",
+                    provider === p.key ? "is-selected" : "hover:bg-muted/60",
                   )}
                 >
                   <div className="font-medium">{p.name}</div>

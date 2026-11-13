@@ -1,0 +1,11 @@
+Generation method: built-in image_gen, transparent_background=true.
+
+Use case: stylized-concept.
+Asset type: a production 3D cloud brand icon for a refined Chinese AI creative workspace named Lingxi. Output ONLY the icon, no lettering.
+Primary request: Create a premium Cinema 4D / Octane style 3D cloud emblem, a small polished sculptural object with convincing depth, softly rounded organic geometry and refined studio lighting. It must look unmistakably like a high-end 3D render, not a flat vector, illustration, emoji, weather-app line icon, or cartoon.
+Subject: one compact asymmetric cloud shape, a single seamlessly joined sculpted volume made of 4-5 inflated rounded lobes, softly rounded base, big upper center-left lobe and smaller right lobe. Wide cloud silhouette, viewed in a subtle front three-quarter perspective with visible depth and sculpted shaded sides. No face, no eyes, no star, no bulb, no sparkles, no text, no orbit, no extra objects.
+Materials: luminous satin-frosted glass with an opalescent ceramic core, smooth subtle translucency only at the rounded edges, broad silky specular highlights, delicate ambient occlusion in the intersections, tactile depth, no grain, no wireframe, no visible outlines. Elegant, soft and contemporary rather than toy-like.
+Palette: only three coordinated cool blues: near-white ice blue highlights, light sky-blue midtones, a restrained medium azure blue along the lower right and shaded side. No purple, no teal, no pink, no orange, no rainbow iridescence. Top is luminous ice-blue, base has softly graded deeper blue, never harsh dark cobalt.
+Lighting: large softbox upper left, subtle cool fill light and gentle rim lighting, beautifully controlled reflective falloff, photorealistic material and 3D volume.
+Composition: square image with the cloud centered, occupies roughly 82% of image width and 60% of image height, comfortably within all edges, clean silhouette readable when reduced to a 40px app logo. Truly transparent alpha background, no colored backdrop, no floor, no scene, no cast shadow outside the object, no checkerboard baked into the image.
+Quality: crisp premium branding asset, antialiased edges, sophisticated sculptural C4D render.

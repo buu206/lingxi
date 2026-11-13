@@ -32,7 +32,7 @@ export function useShell() {
 export function TopBar({ title, actions }: { title: ReactNode; actions?: ReactNode }) {
   const { openSidebar } = useShell()
   return (
-    <header className="flex h-12 shrink-0 items-center gap-2 border-b px-3 sm:px-4">
+    <header className="workshop-topbar flex shrink-0 items-center gap-2 px-4 sm:px-7">
       <Button variant="ghost" size="icon-sm" className="-ms-1 md:hidden" onClick={openSidebar} aria-label="打开菜单">
         <MenuIcon />
       </Button>
@@ -63,7 +63,7 @@ export const READING = "max-w-[44rem]"
 export function ScrollBody({ children, className }: { children: ReactNode; className?: string }) {
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className={cn("mx-auto w-full max-w-5xl px-4 py-6 sm:px-6", className)}>{children}</div>
+      <div className={cn("workshop-page-body mx-auto w-full max-w-5xl px-4 py-6 sm:px-7", className)}>{children}</div>
     </div>
   )
 }

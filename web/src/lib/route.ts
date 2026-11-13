@@ -2,6 +2,7 @@ import { useEffect, useState } from "react"
 
 export type Route =
   | { page: "home" }
+  | { page: "products" }
   | { page: "new" }
   | { page: "settings" }
   | { page: "product"; slug: string; tab: string }
@@ -11,6 +12,7 @@ export type Route =
 
 /** 用 hash 路由：服务端只需要托管一个 index.html。 */
 export function parseRoute(hash: string): Route {
+  if (hash === "#/products") return { page: "products" }
   if (hash === "#/new") return { page: "new" }
   if (hash === "#/settings") return { page: "settings" }
   if (hash === "#/audits") return { page: "audits" }

@@ -1,92 +1,105 @@
-import { ArrowRightIcon, PlusIcon } from "lucide-react"
+import { ArrowRightIcon, ArrowUpIcon, FolderSearchIcon, Grid2X2Icon, Layers3Icon, CloudIcon, MenuIcon } from "lucide-react"
+import { useRef, useState, type FormEvent, type KeyboardEvent } from "react"
 
-import { Chip, ModeCallouts, Screen, ScrollBody, TopBar, timeAgo, useShell } from "@/components/common"
+import { BrandCloud } from "@/components/brand"
+import { useSettings, useShell } from "@/components/common"
 import { Button } from "@/components/ui/button"
-import { productHref } from "@/lib/route"
-
-const STEPS = [
-  ["说出想法", "一句话就行。我会分三轮问你：给谁用、怎么用、什么不能做。"],
-  ["引擎推导方案", "需求拆解、组件选型、架构和提示词，最后还有一轮独立审稿。"],
-  ["回答问题，再迭代", "方案会列出还没想清楚的问题，在对话里一题一题答，答完自动重新推导。"],
-]
-
-const newButton = (
-  <Button size="sm" nativeButton={false} render={<a href="#/new" />}>
-    <PlusIcon /> 新建产品
-  </Button>
-)
+import { editIntakeDraft, getIntakeDraft, saveIntakeDraft } from "@/lib/intake-draft"
 
 export function HomePage() {
-  const { products } = useShell()
-  if (!products) return <Screen><TopBar title="我的产品" /></Screen>
+  const { settings } = useSettings()
+  const { openSidebar } = useShell()
+  const [idea, setIdea] = useState(() => {
+    const draft = getIntakeDraft()
+    return draft?.status === "pending" ? draft.text : ""
+  })
+  const input = useRef<HTMLTextAreaElement>(null)
+  const composing = useRef(false)
+  const submitting = useRef(false)
 
-  if (!products.length) {
-    return (
-      <Screen>
-        <TopBar title="我的产品" />
-        <ScrollBody className="max-w-xl py-16">
-          <ModeCallouts />
-          <h1 className="text-xl font-semibold tracking-tight">把一个想法，推导成能做的 Agent 方案</h1>
-          <p className="mt-2 text-sm text-muted-foreground">
-            不用懂技术，也不用会写需求文档。像聊天一样说清楚你想做什么，剩下的交给引擎。
-          </p>
-          <ol className="mt-6 divide-y rounded-lg border bg-card">
-            {STEPS.map(([title, desc], i) => (
-              <li key={title} className="flex gap-3 px-4 py-3">
-                <span className="pt-0.5 font-mono text-xs text-muted-foreground">0{i + 1}</span>
-                <div>
-                  <div className="text-sm font-medium">{title}</div>
-                  <p className="mt-0.5 text-sm text-muted-foreground">{desc}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-          <Button className="mt-6" nativeButton={false} render={<a href="#/new" />}>
-            开始一个新产品 <ArrowRightIcon />
-          </Button>
-        </ScrollBody>
-      </Screen>
-    )
+  const submit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (composing.current || submitting.current || !idea.trim()) return
+    submitting.current = true
+    saveIntakeDraft(idea)
+    location.hash = "#/new"
+  }
+
+  const onKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter 选中文输入法候选词时不能发消息；Shift + Enter 保留换行。
+    if (event.nativeEvent.isComposing || composing.current || event.nativeEvent.keyCode === 229) return
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault()
+      if (!event.repeat) event.currentTarget.form?.requestSubmit()
+    }
+  }
+
+  const suggest = (text: string) => {
+    setIdea(text)
+    editIntakeDraft(text)
+    input.current?.focus()
+    requestAnimationFrame(() => input.current?.setSelectionRange(text.length, text.length))
   }
 
   return (
-    <Screen>
-      <TopBar
-        title={<>我的产品 <span className="font-mono text-xs font-normal text-muted-foreground">{products.length}</span></>}
-        actions={newButton}
-      />
-      <ScrollBody>
-        <ModeCallouts />
-        <div className="overflow-hidden rounded-lg border bg-card">
-          <div className="grid grid-cols-[1fr_auto] gap-4 border-b px-4 py-2 font-mono text-xs tracking-wide text-muted-foreground sm:grid-cols-[3rem_1fr_10rem_6rem]">
-            <span className="hidden sm:block">版本</span>
-            <span>产品</span>
-            <span className="hidden sm:block">状态</span>
-            <span className="text-right">更新</span>
-          </div>
-          {products.map((p) => (
-            <a
-              key={p.slug}
-              href={productHref(p.slug)}
-              className="grid grid-cols-[1fr_auto] items-center gap-4 border-b px-4 py-2.5 text-sm transition-colors last:border-b-0 hover:bg-muted/50 sm:grid-cols-[3rem_1fr_10rem_6rem]"
-            >
-              <span className="hidden font-mono text-xs text-muted-foreground sm:block">V{p.version}</span>
-              <span className="min-w-0 truncate font-medium">{p.name}</span>
-              <span className="hidden sm:block">
-                {!p.has_plan ? (
-                  <Chip>还没有方案</Chip>
-                ) : p.unknowns ? (
-                  <Chip tone="ask">{p.unknowns} 个待确认问题</Chip>
-                ) : (
-                  <Chip tone="ok">方案已生成</Chip>
-                )}
-              </span>
-              <span className="text-right text-xs text-muted-foreground">{timeAgo(p.updated)}</span>
-            </a>
-          ))}
+    <div className="hero-page">
+      <div className="hero-mobile-menu md:hidden">
+        <Button variant="ghost" size="icon-sm" onClick={openSidebar} aria-label="打开菜单">
+          <MenuIcon />
+        </Button>
+      </div>
+
+      <section className="hero-welcome" aria-labelledby="hero-title">
+        <BrandCloud className="hero-cloud" />
+        <div className="hero-heading">
+          <p className="hero-eyebrow">让灵感，慢慢成形</p>
+          <h1 id="hero-title">你好，我是<span>灵犀</span></h1>
+          <p className="hero-description">从一个小小的想法，到真正可落地的 Agent。<br className="sm:hidden" />我们一起开始。</p>
         </div>
-        <p className="mt-3 text-xs text-muted-foreground">每个产品一个文件夹，需求文档、方案、迭代记录都在引擎目录的 out/ 下。</p>
-      </ScrollBody>
-    </Screen>
+
+        <form className="hero-composer" onSubmit={submit} aria-label="开始一个新想法">
+          <label className="sr-only" htmlFor="hero-idea">说说你想做的产品</label>
+          <textarea
+            ref={input}
+            id="hero-idea"
+            className="hero-input"
+            rows={2}
+            maxLength={6000}
+            value={idea}
+            onChange={(event) => { setIdea(event.target.value); editIntakeDraft(event.target.value) }}
+            onKeyDown={onKeyDown}
+            onCompositionStart={() => { composing.current = true }}
+            onCompositionEnd={() => { composing.current = false }}
+            placeholder="说说你的想法，或者一个想解决的小问题…"
+            aria-describedby="hero-input-hint"
+          />
+          <div className="hero-composer-bottom">
+            <span id="hero-input-hint" className="hero-input-hint"><CloudIcon aria-hidden="true" /> 一句话，也可以是一个好开始</span>
+            <button className="hero-send" type="submit" disabled={!idea.trim()} aria-label="发送想法，开始对话" title="发送想法（Enter）">
+              <ArrowUpIcon aria-hidden="true" />
+            </button>
+          </div>
+        </form>
+
+        <div className="hero-suggestions" aria-label="从这里开始">
+          <button type="button" onClick={() => suggest("我想做一个 Agent，帮助 ")}><CloudIcon aria-hidden="true" /><span>做一个新 Agent</span></button>
+          <button type="button" onClick={() => suggest("帮我梳理这个想法的 MVP，先确定第一版最值得做的功能：")}><Layers3Icon aria-hidden="true" /><span>梳理产品 MVP</span></button>
+          <a href="#/audits/new"><FolderSearchIcon aria-hidden="true" /><span>检查已有项目</span></a>
+          <a href="#/products"><Grid2X2Icon aria-hidden="true" /><span>查看我的产品</span></a>
+        </div>
+
+        {settings.mock ? (
+          <p className="hero-mode-note">正在离线体验，回复和方案为演示内容。</p>
+        ) : !settings.configured ? (
+          <p className="hero-mode-note">
+            先记下灵感，连接模型后就能开始。
+            <a href="#/settings" onClick={() => { if (idea.trim()) saveIntakeDraft(idea) }}>连接模型 <ArrowRightIcon aria-hidden="true" /></a>
+          </p>
+        ) : (
+          <p className="hero-mode-note">不必想得很完整，我们会一起把它想清楚。</p>
+        )}
+      </section>
+      <p className="hero-footer">每一个值得做的产品，都始于一个小小的想法。</p>
+    </div>
   )
 }
