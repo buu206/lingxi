@@ -465,11 +465,20 @@ def make_handler(app: App):
             return self._error(500, "引擎内部出错了，可能是工作区里的文件被改坏了。详细信息在启动界面的终端窗口里。")
 
         def _body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                raise ValueError("请求格式不对") from None
+            if length < 0:           # 负数会让 rfile.read 一直等到对方断开，白白占住一个线程
+                raise ValueError("请求格式不对")
             if length > MAX_BODY:
                 raise ValueError("提交的内容太长了")
             raw = self.rfile.read(length) if length else b"{}"
-            data = json.loads(raw.decode("utf-8") or "{}")
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise ValueError("请求格式不对：内容不是 UTF-8") from None
+            data = json.loads(text or "{}")
             if not isinstance(data, dict):
                 raise ValueError("请求格式不对")
             return data

@@ -340,6 +340,8 @@ def quick_reselect(prd_text: str, runner, ws: Path, log: Callable[[str], None] =
     prd_text = derivation_text(prd_text)        # 与 run_plan 同口径，缓存才能互通
     stages = StageRunner(runner, ws, resume=True, log=log, context={"kind": "plan", "input": prd_text})
     stages.save("input.md", prd_text)
+    from blueprint.forward import remember_overrides
+    remember_overrides(ws, prd_text, feature_overrides or {})
     extract = stages.run("extract", load_prompt("extract").format(
         fact_keys=_fmt_fact_keys(), features=_fmt_features(),
         questions=_fmt_questions(), input=prd_text), EXTRACT_SCHEMA, "① 需求拆解（快速模式）")
