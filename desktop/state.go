@@ -61,10 +61,20 @@ type PlanComponent struct {
 }
 
 type PlanLayer struct {
-	Num      int    `json:"num"`
+	Num      string `json:"num"` // 引擎给的是圈号「①」…「⑦」，不是数字
 	Name     string `json:"name"`
 	Question string `json:"question"`
 	Detail   string `json:"detail"`
+}
+
+// PlanTool 是方案里的一个工具（与 web/src/lib/api.ts 的 Tool 对齐）。
+type PlanTool struct {
+	Name       string `json:"name"`
+	Input      string `json:"input"`
+	Output     string `json:"output"`
+	SideEffect string `json:"side_effect"`
+	Permission string `json:"permission"` // allow | ask | deny
+	Layer      string `json:"layer"`
 }
 
 type PlanFact struct {
@@ -92,7 +102,7 @@ type PlanView struct {
 	Elements               []PlanElement     `json:"elements"`
 	Components             []PlanComponent   `json:"components"`
 	Layers                 []PlanLayer       `json:"layers"`
-	ToolList               []string          `json:"tool_list"`
+	ToolList               []PlanTool        `json:"tool_list"`
 	SystemPrompt           string            `json:"system_prompt"`
 	ContextMemoryStrategy  string            `json:"context_memory_strategy"`
 	SecurityAndDegradation []string          `json:"security_and_degradation"`
@@ -178,6 +188,7 @@ type AppState struct {
 	playStarted   bool
 	playMessages  []PlayMsg
 	playStreaming bool
+	playGen       int // 换产品或发新一句就 +1；旧的流式回复对不上号就丢掉，免得串到别的产品
 	playDraft     string
 	playFeedback  bool // 是否收到过「这里不对」的反馈卡
 
@@ -239,6 +250,7 @@ func (s *AppState) selectProduct(slug string) {
 	s.loading = true
 	s.playStarted, s.playIntro, s.playMessages, s.playErr, s.playDraft = false, "", nil, "", ""
 	s.playStreaming = false
+	s.playGen++
 	s.handoffBusy, s.handoffStatus = false, ""
 	s.mu.Unlock()
 	s.invalidate()
@@ -332,6 +344,7 @@ func (s *AppState) startPoll(slug string, job *JobInfo) {
 				continue
 			}
 			upd.Logs = append(append([]string(nil), job.Logs...), upd.Logs...)
+			job = upd // 下一轮在累计后的日志上接，不然中间的增量会丢
 			s.job = upd
 			if upd.Status != "running" {
 				s.mu.Unlock()
@@ -418,11 +431,19 @@ func (s *AppState) sendPlay(text string) {
 	s.playDraft = ""
 	s.playFeedback = false
 	slug := s.selected
+	s.playGen++
+	gen := s.playGen
+	history := chatFromPlay(s.playMessages) // 在锁里取快照，后台 goroutine 不再碰 s.playMessages
+	base := s.engineURL
 	s.mu.Unlock()
 	s.invalidate()
 	go func() {
-		err := streamChat(s.engineURL, "/api/products/"+url.PathEscape(slug)+"/play", chatFromPlay(s.playMessages), func(ev ChatEvent) {
+		err := streamChat(base, "/api/products/"+url.PathEscape(slug)+"/play", history, func(ev ChatEvent) {
 			s.mu.Lock()
+			if s.playGen != gen { // 用户已经换了产品：这条流的事件不再属于当前界面
+				s.mu.Unlock()
+				return
+			}
 			switch ev.Type {
 			case "text":
 				if n := len(s.playMessages); n == 0 || s.playMessages[n-1].Role != "assistant" {
@@ -449,9 +470,11 @@ func (s *AppState) sendPlay(text string) {
 			s.invalidate()
 		})
 		s.mu.Lock()
-		s.playStreaming = false
-		if err != nil {
-			s.playErr = err.Error()
+		if s.playGen == gen {
+			s.playStreaming = false
+			if err != nil {
+				s.playErr = err.Error()
+			}
 		}
 		s.mu.Unlock()
 		s.invalidate()
@@ -459,11 +482,25 @@ func (s *AppState) sendPlay(text string) {
 }
 
 // chatFromPlay 把试玩消息转成引擎要的 {role, text} 列表（step 行不算对话）。
+// chatFromPlay 把试玩记录转成发给引擎的历史，和网页版 chat-runtime.tsx 的 toWire 一致：
+// 一轮回复里的动作卡（wire 文本）和回复正文按顺序拼成一条 assistant 消息，
+// 否则模型下一轮不知道自己已经调过哪些工具。
 func chatFromPlay(msgs []PlayMsg) []ChatMsg {
 	var out []ChatMsg
 	for _, m := range msgs {
-		if m.Role == "user" || m.Role == "assistant" {
-			out = append(out, ChatMsg{Role: m.Role, Text: m.Text})
+		text := m.Text
+		if m.Role == "step" {
+			text = m.Step["wire"]
+		}
+		switch {
+		case m.Role == "user":
+			out = append(out, ChatMsg{Role: "user", Text: text})
+		case m.Role != "assistant" && m.Role != "step", text == "":
+			continue
+		case len(out) > 0 && out[len(out)-1].Role == "assistant":
+			out[len(out)-1].Text += "\n" + text
+		default:
+			out = append(out, ChatMsg{Role: "assistant", Text: text})
 		}
 	}
 	return out
@@ -599,15 +636,17 @@ func (s *AppState) pickAndAudit() {
 		s.invalidate()
 		data, err := createAudit(s.engineURL, folder)
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		s.auditBusy = false
 		if err != nil {
 			s.auditStatus = "创建检查失败：" + err.Error()
+			s.mu.Unlock()
 			s.invalidate()
 			return
 		}
 		slug, _ := data["slug"].(string)
 		s.auditStatus = ""
+		// loadAudits / selectAudit 自己会加锁，这里必须先放锁，否则整个界面死锁。
+		s.mu.Unlock()
 		s.loadAudits()
 		if slug != "" {
 			s.selectAudit(slug)
@@ -686,6 +725,7 @@ func (s *AppState) startAuditPoll(slug string, job *JobInfo) {
 				continue
 			}
 			upd.Logs = append(append([]string(nil), job.Logs...), upd.Logs...)
+			job = upd // 下一轮在累计后的日志上接，不然中间的增量会丢
 			s.auditJob = upd
 			if upd.Status != "running" {
 				s.mu.Unlock()

@@ -307,7 +307,7 @@ func planPanel(c *ui.Context) {
 				sectionTitle(c, "七层架构")
 				for _, layer := range plan.Layers {
 					ui.Column(c).Gap(3).Children(func() {
-						ui.Text(c, fmt.Sprintf("%d · %s", layer.Num, layer.Name)).FontSize(14).Bold()
+						ui.Text(c, fmt.Sprintf("%s %s", layer.Num, layer.Name)).FontSize(14).Bold()
 						if layer.Detail != "" {
 							ui.Text(c, layer.Detail).FontSize(13).TextColor(tk.TextSecondary)
 						}
@@ -322,7 +322,11 @@ func planPanel(c *ui.Context) {
 			if len(plan.ToolList) > 0 {
 				sectionTitle(c, "工具清单")
 				for _, tool := range plan.ToolList {
-					ui.Text(c, "· "+tool).FontSize(13)
+					perm := map[string]string{"allow": "直接执行", "ask": "先问人", "deny": "禁止"}[tool.Permission]
+					if perm == "" {
+						perm = tool.Permission
+					}
+					ui.Text(c, fmt.Sprintf("· %s：%s → %s（%s）", tool.Name, tool.Input, tool.Output, perm)).FontSize(13)
 				}
 			}
 
@@ -433,6 +437,7 @@ func playPanel(c *ui.Context, slug string) {
 	messages := append([]PlayMsg(nil), app.playMessages...)
 	streaming := app.playStreaming
 	draft := app.playDraft
+	draftBefore := draft
 	feedback := app.playFeedback
 	handoffBusy := app.handoffBusy
 	handoffStatus := app.handoffStatus
@@ -484,6 +489,7 @@ func playPanel(c *ui.Context, slug string) {
 		ui.Row(c).Shrink(0).Padding(12, 16).Gap(8).AlignItems(ui.Center).Children(func() {
 			field.Input(c, &draft, field.InputProps{Placeholder: "以使用者的身份说一句话…", Size: theme.Middle}).Grow(1).
 				OnSubmit(func() { go app.sendPlay(draft) })
+			writeBack(&app.playDraft, draftBefore, draft)
 			action.Button(c, "发送", action.ButtonProps{Variant: action.Primary, Size: theme.Middle}).
 				OnClick(func() { go app.sendPlay(draft) })
 		})
@@ -635,6 +641,7 @@ func newProductView(c *ui.Context) {
 	confirm := app.chatConfirm
 	suggest := append([]string(nil), app.chatSuggest...)
 	draft := app.chatDraft
+	draftBefore := draft
 	app.mu.Unlock()
 
 	ui.Column(c).Grow(1).Basis(0).MinWidth(0).Margin(8, 8, 8, 0).
@@ -681,6 +688,7 @@ func newProductView(c *ui.Context) {
 			ui.Row(c).Shrink(0).Padding(12, 16).Gap(8).AlignItems(ui.Center).Children(func() {
 				field.Input(c, &draft, field.InputProps{Placeholder: "描述你的产品点子…", Size: theme.Middle}).Grow(1).
 					OnSubmit(func() { go app.sendChat(draft) })
+				writeBack(&app.chatDraft, draftBefore, draft)
 				action.Button(c, "发送", action.ButtonProps{Variant: action.Primary, Size: theme.Middle}).
 					OnClick(func() { go app.sendChat(draft) })
 			})
@@ -723,6 +731,7 @@ func settingsView(c *ui.Context) {
 	baseURL := app.setBaseURL
 	status := app.setStatus
 	app.mu.Unlock()
+	providerBefore, modelBefore, keyBefore, baseURLBefore := provider, model, key, baseURL
 
 	providers := make([]field.SelectOption, 0, 8)
 	customBase := false
@@ -757,19 +766,23 @@ func settingsView(c *ui.Context) {
 					ui.Column(c).Gap(6).Children(func() {
 						ui.Text(c, "模型服务商").FontSize(13).Bold()
 						field.Select(c, &provider, field.SelectProps{Options: providers, Size: theme.Middle})
+						writeBack(&app.setProvider, providerBefore, provider)
 					})
 					ui.Column(c).Gap(6).Children(func() {
 						ui.Text(c, "模型名").FontSize(13).Bold()
 						field.Input(c, &model, field.InputProps{Placeholder: "留空用服务商默认模型", Size: theme.Middle})
+						writeBack(&app.setModel, modelBefore, model)
 					})
 					ui.Column(c).Gap(6).Children(func() {
 						ui.Text(c, "API Key").FontSize(13).Bold()
 						field.InputPassword(c, &key, field.InputProps{Placeholder: "重新粘贴才覆盖已保存的 Key", Size: theme.Middle})
+						writeBack(&app.setKey, keyBefore, key)
 					})
 					if customBase {
 						ui.Column(c).Gap(6).Children(func() {
 							ui.Text(c, "接口地址").FontSize(13).Bold()
 							field.Input(c, &baseURL, field.InputProps{Placeholder: "https://…/v1", Size: theme.Middle})
+							writeBack(&app.setBaseURL, baseURLBefore, baseURL)
 						})
 					}
 					ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
@@ -791,4 +804,16 @@ func settingsView(c *ui.Context) {
 // revealProduct 调引擎的 reveal 接口，让 Finder 打开工作区目录。
 func revealProduct(base, slug string) {
 	_ = postJSON(base, "/api/products/"+url.PathEscape(slug)+"/reveal", "{}")
+}
+
+// writeBack 把输入框这一帧改过的值写回界面状态。
+// 输入框绑的是每帧从 app 复制出来的局部变量，不写回的话打的字只留在控件里，
+// 发送 / 保存时读到的还是旧值（空串）。只在这一帧真改了才写，免得盖掉后台刚做的清空。
+func writeBack(dst *string, before, after string) {
+	if after == before {
+		return
+	}
+	app.mu.Lock()
+	*dst = after
+	app.mu.Unlock()
 }

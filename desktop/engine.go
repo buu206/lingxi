@@ -42,6 +42,9 @@ func (s *AppState) startEngine(mock bool) {
 	}
 	cmd := exec.Command(py, args...)
 	cmd.Dir = root
+	// stdout 接的是管道，Python 默认整块缓冲，「界面已启动」那行会一直攒着不发，
+	// 等满 30 秒就被当成没起来。关掉缓冲让启动行立刻送到。
+	cmd.Env = append(os.Environ(), "PYTHONUNBUFFERED=1")
 	// stderr 直接透传到终端（app 的 stderr），引擎崩了能看到 traceback。
 	cmd.Stderr = os.Stderr
 	stdout, err := cmd.StdoutPipe()
