@@ -198,3 +198,32 @@ def test_architecture_diagram_reads_layer_names_and_stays_short():
     assert nodes["⑦ 基础设施层"] == "第一版部署形态：单进程服务"
     chart = render_mermaid("t", [], tools, {}, "A & B <c> \"d\"")
     assert "#38;" not in chart and "#60;" not in chart and "A ＆ B ＜c＞ ＂d＂" in chart
+
+
+def test_source_digest_changes_when_unread_files_change(tmp_path):
+    """回归：指纹只算会读内容的文本文件，改了 .vue/.c 或超大文件，audit --resume 仍沿用旧的 agent 结论。"""
+    import os
+
+    from blueprint.scanner import MAX_FILE_BYTES, scan_project
+    (tmp_path / "agent.py").write_text("print('hi')\n", encoding="utf-8")
+    (tmp_path / "app.vue").write_text("<template>a</template>\n", encoding="utf-8")
+    (tmp_path / "big.py").write_text("x = 1\n" * (MAX_FILE_BYTES // 6 + 10), encoding="utf-8")
+    before = scan_project(tmp_path).source_digest
+    assert scan_project(tmp_path).source_digest == before          # 没改就稳定
+    (tmp_path / "app.vue").write_text("<template>bb</template>\n", encoding="utf-8")
+    after_vue = scan_project(tmp_path).source_digest
+    assert after_vue != before
+    big = tmp_path / "big.py"
+    st = big.stat()
+    os.utime(big, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+    assert scan_project(tmp_path).source_digest != after_vue
+
+
+def test_empty_assistant_turn_is_valid_openai_message():
+    """回归：既没正文也没工具调用的回复被翻成 content=null，OpenAI 接口会 400。"""
+    from blueprint.openai_compat import to_openai_messages
+    out = to_openai_messages("", [{"role": "assistant", "content": [{"type": "thinking", "thinking": "嗯"}]},
+                                  {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "f",
+                                                                     "input": {}}]}])
+    assert out[0]["content"] == ""
+    assert out[1]["content"] is None and out[1]["tool_calls"][0]["id"] == "t1"

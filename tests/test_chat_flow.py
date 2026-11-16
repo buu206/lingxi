@@ -116,3 +116,28 @@ def test_option_letter_keeps_only_the_choice_not_the_tradeoff():
     assert answers == {0: "一律先问店主"}
     _i, answers, _a = answer_state(QS, conv(("assistant", "B. 只限制打折 -- 流程少一步"), ("user", "B")))
     assert answers == {0: "只限制打折"}
+
+
+def test_stopped_chat_stream_still_records_usage():
+    """回归：用户中途停止时 record_usage 在 yield from 之后，被跳过，这条回复的用量整条漏记。"""
+    from types import SimpleNamespace
+
+    from blueprint.chat import AnthropicChat
+    from blueprint.llm import AnthropicRunner, Budget
+
+    class FakeStream:
+        text_stream = iter(["你好，", "说说看", "再说"])
+        current_message_snapshot = SimpleNamespace(usage=SimpleNamespace(input_tokens=30, output_tokens=3))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    runner = AnthropicRunner(model="m", budget=Budget(max_calls=4),
+                             client=SimpleNamespace(messages=SimpleNamespace(stream=lambda **_k: FakeStream())))
+    gen = AnthropicChat(runner).stream("问题")
+    assert next(gen) == "你好，"
+    gen.close()                                  # 界面点了停止
+    assert runner.budget.calls == 1 and runner.budget.output_tokens == 3

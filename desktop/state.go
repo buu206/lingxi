@@ -61,10 +61,20 @@ type PlanComponent struct {
 }
 
 type PlanLayer struct {
-	Num      int    `json:"num"`
+	Num      string `json:"num"` // 引擎给的是圈号「①」…「⑦」，不是数字
 	Name     string `json:"name"`
 	Question string `json:"question"`
 	Detail   string `json:"detail"`
+}
+
+// PlanTool 是方案里的一个工具（与 web/src/lib/api.ts 的 Tool 对齐）。
+type PlanTool struct {
+	Name       string `json:"name"`
+	Input      string `json:"input"`
+	Output     string `json:"output"`
+	SideEffect string `json:"side_effect"`
+	Permission string `json:"permission"` // allow | ask | deny
+	Layer      string `json:"layer"`
 }
 
 type PlanFact struct {
@@ -92,7 +102,7 @@ type PlanView struct {
 	Elements               []PlanElement     `json:"elements"`
 	Components             []PlanComponent   `json:"components"`
 	Layers                 []PlanLayer       `json:"layers"`
-	ToolList               []string          `json:"tool_list"`
+	ToolList               []PlanTool        `json:"tool_list"`
 	SystemPrompt           string            `json:"system_prompt"`
 	ContextMemoryStrategy  string            `json:"context_memory_strategy"`
 	SecurityAndDegradation []string          `json:"security_and_degradation"`
@@ -157,6 +167,7 @@ type AppState struct {
 	engineURL string // 解析到的引擎地址，空 = 还没起来
 	engineErr string // 引擎起不来时的原因（给人看）
 	engineCmd *exec.Cmd
+	quitting  bool // 自己要停引擎时置上，退出原因就不当成「引擎退出了」报错
 
 	products []Product
 	selected string // 选中产品的 slug
@@ -178,6 +189,7 @@ type AppState struct {
 	playStarted   bool
 	playMessages  []PlayMsg
 	playStreaming bool
+	playGen       int // 换产品或发新一句就 +1；旧的流式回复对不上号就丢掉，免得串到别的产品
 	playDraft     string
 	playFeedback  bool // 是否收到过「这里不对」的反馈卡
 
@@ -217,8 +229,8 @@ type AppState struct {
 func newState() *AppState { return &AppState{} }
 
 func (s *AppState) invalidate() {
-	if invalidate != nil {
-		invalidate()
+	if fn := invalidate.Load(); fn != nil {
+		(*fn)()
 	}
 }
 
@@ -239,6 +251,7 @@ func (s *AppState) selectProduct(slug string) {
 	s.loading = true
 	s.playStarted, s.playIntro, s.playMessages, s.playErr, s.playDraft = false, "", nil, "", ""
 	s.playStreaming = false
+	s.playGen++
 	s.handoffBusy, s.handoffStatus = false, ""
 	s.mu.Unlock()
 	s.invalidate()
@@ -247,7 +260,7 @@ func (s *AppState) selectProduct(slug string) {
 }
 
 func (s *AppState) fetchPRD(slug string) {
-	ver, text, err := getPRD(s.engineURL, slug)
+	ver, text, err := getPRD(s.baseURL(), slug)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.selected != slug {
@@ -264,7 +277,7 @@ func (s *AppState) fetchPRD(slug string) {
 
 // fetchDetail 拉结构化方案 + 最新任务；任务在跑就接着轮询进度。
 func (s *AppState) fetchDetail(slug string) {
-	data, err := getProductDetail(s.engineURL, slug)
+	data, err := getProductDetail(s.baseURL(), slug)
 	s.mu.Lock()
 	if s.selected != slug {
 		s.mu.Unlock()
@@ -307,6 +320,7 @@ func (s *AppState) startPoll(slug string, job *JobInfo) {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		last := job.LogCount
+		failures := 0
 		for {
 			select {
 			case <-stop:
@@ -323,6 +337,11 @@ func (s *AppState) startPoll(slug string, job *JobInfo) {
 				return
 			}
 			if err != nil {
+				if giveUpPolling(&failures, base, s.job) {
+					s.mu.Unlock()
+					s.invalidate()
+					return
+				}
 				s.mu.Unlock()
 				continue // 引擎暂时没响应，下轮再试
 			}
@@ -331,7 +350,9 @@ func (s *AppState) startPoll(slug string, job *JobInfo) {
 				s.mu.Unlock()
 				continue
 			}
+			failures = 0
 			upd.Logs = append(append([]string(nil), job.Logs...), upd.Logs...)
+			job = upd // 下一轮在累计后的日志上接，不然中间的增量会丢
 			s.job = upd
 			if upd.Status != "running" {
 				s.mu.Unlock()
@@ -385,7 +406,7 @@ func (s *AppState) startPlay(slug string) {
 	s.mu.Unlock()
 	s.invalidate()
 	go func() {
-		data, err := postEmpty(s.engineURL, "/api/products/"+url.PathEscape(slug)+"/play-intro")
+		data, err := postEmpty(s.baseURL(), "/api/products/"+url.PathEscape(slug)+"/play-intro")
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.selected != slug {
@@ -418,11 +439,19 @@ func (s *AppState) sendPlay(text string) {
 	s.playDraft = ""
 	s.playFeedback = false
 	slug := s.selected
+	s.playGen++
+	gen := s.playGen
+	history := chatFromPlay(s.playMessages) // 在锁里取快照，后台 goroutine 不再碰 s.playMessages
+	base := s.engineURL
 	s.mu.Unlock()
 	s.invalidate()
 	go func() {
-		err := streamChat(s.engineURL, "/api/products/"+url.PathEscape(slug)+"/play", chatFromPlay(s.playMessages), func(ev ChatEvent) {
+		err := streamChat(base, "/api/products/"+url.PathEscape(slug)+"/play", history, func(ev ChatEvent) {
 			s.mu.Lock()
+			if s.playGen != gen { // 用户已经换了产品：这条流的事件不再属于当前界面
+				s.mu.Unlock()
+				return
+			}
 			switch ev.Type {
 			case "text":
 				if n := len(s.playMessages); n == 0 || s.playMessages[n-1].Role != "assistant" {
@@ -449,9 +478,11 @@ func (s *AppState) sendPlay(text string) {
 			s.invalidate()
 		})
 		s.mu.Lock()
-		s.playStreaming = false
-		if err != nil {
-			s.playErr = err.Error()
+		if s.playGen == gen {
+			s.playStreaming = false
+			if err != nil {
+				s.playErr = err.Error()
+			}
 		}
 		s.mu.Unlock()
 		s.invalidate()
@@ -459,11 +490,25 @@ func (s *AppState) sendPlay(text string) {
 }
 
 // chatFromPlay 把试玩消息转成引擎要的 {role, text} 列表（step 行不算对话）。
+// chatFromPlay 把试玩记录转成发给引擎的历史，和网页版 chat-runtime.tsx 的 toWire 一致：
+// 一轮回复里的动作卡（wire 文本）和回复正文按顺序拼成一条 assistant 消息，
+// 否则模型下一轮不知道自己已经调过哪些工具。
 func chatFromPlay(msgs []PlayMsg) []ChatMsg {
 	var out []ChatMsg
 	for _, m := range msgs {
-		if m.Role == "user" || m.Role == "assistant" {
-			out = append(out, ChatMsg{Role: m.Role, Text: m.Text})
+		text := m.Text
+		if m.Role == "step" {
+			text = m.Step["wire"]
+		}
+		switch {
+		case m.Role == "user":
+			out = append(out, ChatMsg{Role: "user", Text: text})
+		case m.Role != "assistant" && m.Role != "step", text == "":
+			continue
+		case len(out) > 0 && out[len(out)-1].Role == "assistant":
+			out[len(out)-1].Text += "\n" + text
+		default:
+			out = append(out, ChatMsg{Role: "assistant", Text: text})
 		}
 	}
 	return out
@@ -480,12 +525,19 @@ func (s *AppState) downloadHandoffZip(slug string) {
 	}
 	s.handoffBusy = true
 	s.handoffStatus = ""
+	base := s.engineURL
 	s.mu.Unlock()
 	s.invalidate()
 	go func() {
-		path, err := downloadHandoff(s.engineURL, slug)
+		path, err := downloadHandoff(base, slug)
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		if s.selected != slug { // 下载期间换了产品：结果不写到别的产品页上（selectProduct 已复位忙碌状态）
+			if err == nil {
+				_ = exec.Command("open", "-R", path).Start()
+			}
+			return
+		}
 		s.handoffBusy = false
 		if err != nil {
 			s.handoffStatus = "下载失败：" + err.Error()
@@ -538,7 +590,7 @@ func (s *AppState) selectAudit(slug string) {
 }
 
 func (s *AppState) fetchAudit(slug string) {
-	data, err := getAuditDetail(s.engineURL, slug)
+	data, err := getAuditDetail(s.baseURL(), slug)
 	s.mu.Lock()
 	if s.auditSelected != slug {
 		s.mu.Unlock()
@@ -581,7 +633,7 @@ func (s *AppState) pickAndAudit() {
 	s.mu.Unlock()
 	s.invalidate()
 	go func() {
-		folder, err := pickFolder(s.engineURL)
+		folder, err := pickFolder(s.baseURL())
 		if err != nil || folder == "" {
 			s.mu.Lock()
 			s.auditBusy = false
@@ -597,17 +649,19 @@ func (s *AppState) pickAndAudit() {
 		s.auditStatus = "开始检查：" + folder
 		s.mu.Unlock()
 		s.invalidate()
-		data, err := createAudit(s.engineURL, folder)
+		data, err := createAudit(s.baseURL(), folder)
 		s.mu.Lock()
-		defer s.mu.Unlock()
 		s.auditBusy = false
 		if err != nil {
 			s.auditStatus = "创建检查失败：" + err.Error()
+			s.mu.Unlock()
 			s.invalidate()
 			return
 		}
 		slug, _ := data["slug"].(string)
 		s.auditStatus = ""
+		// loadAudits / selectAudit 自己会加锁，这里必须先放锁，否则整个界面死锁。
+		s.mu.Unlock()
 		s.loadAudits()
 		if slug != "" {
 			s.selectAudit(slug)
@@ -628,7 +682,7 @@ func (s *AppState) rerunAudit(slug string) {
 	s.invalidate()
 	go func() {
 		body, _ := json.Marshal(map[string]string{"mode": "recheck"})
-		data, err := postJSONData(s.engineURL, "/api/audits/"+url.PathEscape(slug)+"/run", string(body))
+		data, err := postJSONData(s.baseURL(), "/api/audits/"+url.PathEscape(slug)+"/run", string(body))
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		s.auditBusy = false
@@ -661,6 +715,7 @@ func (s *AppState) startAuditPoll(slug string, job *JobInfo) {
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 		last := job.LogCount
+		failures := 0
 		for {
 			select {
 			case <-stop:
@@ -677,6 +732,11 @@ func (s *AppState) startAuditPoll(slug string, job *JobInfo) {
 				return
 			}
 			if err != nil {
+				if giveUpPolling(&failures, base, s.auditJob) {
+					s.mu.Unlock()
+					s.invalidate()
+					return
+				}
 				s.mu.Unlock()
 				continue
 			}
@@ -685,7 +745,9 @@ func (s *AppState) startAuditPoll(slug string, job *JobInfo) {
 				s.mu.Unlock()
 				continue
 			}
+			failures = 0
 			upd.Logs = append(append([]string(nil), job.Logs...), upd.Logs...)
+			job = upd // 下一轮在累计后的日志上接，不然中间的增量会丢
 			s.auditJob = upd
 			if upd.Status != "running" {
 				s.mu.Unlock()
@@ -721,7 +783,10 @@ func (s *AppState) sendChat(text string) {
 
 // streamIntake 消费 NDJSON 事件流：text 增量拼进回复，tool 弹确认卡，suggestions 变成快捷按钮。
 func (s *AppState) streamIntake() {
-	err := streamChat(s.engineURL, "/api/chat/intake", s.chatMessages, func(ev ChatEvent) {
+	s.mu.Lock()
+	base, history := s.engineURL, append([]ChatMsg(nil), s.chatMessages...) // 锁内取快照，确认建产品时会清空它
+	s.mu.Unlock()
+	err := streamChat(base, "/api/chat/intake", history, func(ev ChatEvent) {
 		s.mu.Lock()
 		switch ev.Type {
 		case "text":
@@ -765,7 +830,7 @@ func (s *AppState) confirmProduct() {
 	s.chatSuggest = nil
 	s.mu.Unlock()
 	go func() {
-		slug, err := createProduct(s.engineURL, card.Name, card.Idea)
+		slug, err := createProduct(s.baseURL(), card.Name, card.Idea)
 		s.mu.Lock()
 		if err != nil {
 			s.chatError = fmt.Sprintf("创建产品失败：%v", err)
@@ -840,4 +905,26 @@ func toString(v any) string {
 		return s
 	}
 	return fmt.Sprint(v)
+}
+
+// giveUpPolling 轮询任务进度出错时决定要不要停：引擎已经没了（地址为空），
+// 或者连续 15 次（约 30 秒）都拿不到（引擎重启后旧任务号查不到），就停下并在任务上写明原因，
+// 不再每 2 秒无休止地重试。调用方必须持有 s.mu。
+func giveUpPolling(failures *int, base string, job *JobInfo) bool {
+	*failures++
+	if base != "" && *failures < 15 {
+		return false
+	}
+	if job != nil && job.Status == "running" {
+		job.Status = "failed"
+		job.Error = "连不上引擎，查不到这个任务的进度了。引擎重启过的话，刷新一下看结果。"
+	}
+	return true
+}
+
+// baseURL 在锁里读引擎地址：引擎退出的 goroutine 会同时把它清空。
+func (s *AppState) baseURL() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.engineURL
 }

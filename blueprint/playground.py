@@ -158,7 +158,25 @@ def _live_agent_events(design: dict, messages: list[Message], prd: str, model) -
         finally:
             steps.put(None)
 
-    threading.Thread(target=work, daemon=True).start()
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    try:
+        yield from _drain_agent(design, messages, prd, model, steps, outcome)
+    finally:
+        if worker.is_alive():
+            # 用户点了停止（生成器被关掉）：不许 agent 再发起新的调用，等手上这一次结束，
+            # 用量才完整；否则后台线程继续花钱，而 metered 已经按半路的数字记账了。
+            budget = getattr(getattr(model, "runner", None), "budget", None)
+            if budget is not None:
+                budget.max_calls = min(budget.max_calls, budget.calls)
+            worker.join(timeout=STOP_WAIT_SECONDS)
+
+
+STOP_WAIT_SECONDS = 180   # 和接口超时同量级：在途的那次调用回来就停
+
+
+def _drain_agent(design: dict, messages: list[Message], prd: str, model, steps: queue.Queue,
+                 outcome: dict) -> Iterator[dict]:
     shown = 0
     while (step := steps.get()) is not None:
         shown += 1

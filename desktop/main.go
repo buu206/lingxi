@@ -9,6 +9,10 @@ package main
 import (
 	"flag"
 	"log"
+	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -22,12 +26,14 @@ import (
 var mockMode = flag.Bool("mock", false, "引擎离线演示模式（不调用模型）")
 
 // invalidate 由每帧的 root 视图赋值；后台 goroutine 取到数据后调它触发重绘。
-var invalidate func()
+// 界面线程写、后台 goroutine 读，用原子指针，免得数据竞争。
+var invalidate atomic.Pointer[func()]
 
 var app = newState()
 
 func root(c *ui.Context) {
-	invalidate = c.Invalidate
+	fn := c.Invalidate
+	invalidate.Store(&fn)
 	theme.Apply(c)
 	tk := theme.TokensOf(c)
 	ui.Column(c).Fill().Background(tk.BgLayout).Children(func() {
@@ -51,6 +57,15 @@ func windowOptions() mygo.WindowOptions {
 
 func main() {
 	flag.Parse()
+	// 退出时一定带走引擎：App.Run 之后的 stopEngine 在强制退出（os.Exit）时走不到，
+	// 引擎就留在后台占着端口。OnWillQuit 在事件循环停下前调用；收到终止信号也先停引擎。
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { app.stopEngine() })
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		<-sigs
+		app.stopEngine()
+	}()
 	mygo.App.WhenReady(func() {
 		mygo.App.SetLocale("zh-Hans")
 		mygo.NewWindow(windowOptions())

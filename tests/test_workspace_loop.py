@@ -102,6 +102,36 @@ def test_revise_reruns_plan_and_logs_component_diff(tmp_path):
     assert (ws / "方案.md").read_text(encoding="utf-8").count("# PRD 推导方案") == 1
 
 
+def test_revise_rolls_back_prd_when_replan_fails(tmp_path):
+    """回归：重推方案中途触发费用护栏时 PRD 已升版，重跑同一条 revise 又升一版（V1 → V3、需求出现两次）。"""
+    from blueprint.forward import run_plan
+    from blueprint.llm import BudgetExceeded
+
+    class FailAtReview(MockRunner):
+        def complete(self, stage, system, prompt, schema):
+            if stage == "review":
+                raise BudgetExceeded("已达到调用次数上限 1")
+            return super().complete(stage, system, prompt, schema)
+
+    ws = _init(tmp_path)
+    run_plan((ws / "PRD.md").read_text(encoding="utf-8"), MockRunner(), ws, log=quiet)
+    original = (ws / "PRD.md").read_text(encoding="utf-8")
+    plan_before = (ws / "plan.json").read_text(encoding="utf-8")
+    req = "新增：要审计每一次删除邮件的操作"
+    with pytest.raises(BudgetExceeded):
+        revise_workspace(ws, req, FailAtReview(), log=quiet)
+    assert (ws / "PRD.md").read_text(encoding="utf-8") == original
+    assert (ws / "plan.json").read_text(encoding="utf-8") == plan_before
+    assert not list((ws / "prd").glob("V1*"))                  # 这次新建的快照也撤掉
+    assert "V2 · 新需求" not in (ws / "迭代记录.md").read_text(encoding="utf-8")
+
+    result = revise_workspace(ws, req, MockRunner(), log=quiet)  # 重跑：只升一版，需求只出现一次
+    prd = (ws / "PRD.md").read_text(encoding="utf-8")
+    assert result["new_version"] == 2 and current_version(prd) == 2
+    assert "V3" not in prd and prd.count("### V2") == 1 and pending_versions(prd) == ["V2"]
+    assert sorted(p.name for p in (ws / "prd").iterdir()) == ["V1.md", "V1.plan.json"]
+
+
 def test_revise_without_plan_only_bumps_prd(tmp_path):
     ws = _init(tmp_path)
     result = revise_workspace(ws, "只记一下", None, run_plan_flag=False, log=quiet)
@@ -321,3 +351,30 @@ def test_review_knows_empty_gap_table_means_all_required_present(tmp_path):
     assert "差距表为空，表示必选组件都已具备" in review
     others = review.split("## 其余组件（供参考，不用复核）", 1)[1].split("##", 1)[0]
     assert '"s13"' in others and '"不需要"' in others
+
+
+def test_cli_rejects_quick_with_no_plan_and_eval_has_no_out(capsys):
+    """回归：revise --no-plan --quick 什么都没跑却报「快速模式…选型变化：无」；eval 收下 -o / --resume 却不生效。"""
+    from blueprint.cli import build_parser
+    for argv in (["revise", "ws", "x", "--no-plan", "--quick"], ["eval", "-o", "/tmp/x"], ["eval", "--resume"]):
+        with pytest.raises(SystemExit) as exc:
+            build_parser().parse_args(argv)
+        assert exc.value.code == 2, argv
+    assert build_parser().parse_args(["eval", "--mock"]).mock
+
+
+def test_plan_resume_keeps_overrides_from_revise(tmp_path):
+    """回归：revise 沿用上一版的特征判断，之后按提示跑 plan --resume 时却没传，组件选型可能被模型重新判断翻掉。"""
+    from blueprint.forward import recall_overrides, remember_overrides, run_plan
+    from blueprint.workspace import derivation_text
+    ws = _init(tmp_path)
+    prd = (ws / "PRD.md").read_text(encoding="utf-8")
+    text = derivation_text(prd)
+    overrides = {"destructive_ops": {"value": "yes", "evidence": "沿用 V1 的判断"}}
+    remember_overrides(ws, text, overrides)
+    assert recall_overrides(ws, text) == overrides
+    assert recall_overrides(ws, text + "\n改过了") is None          # PRD 变了就重新判断
+
+    plan, _doc = run_plan(prd, MockRunner(), ws, resume=True, log=quiet)
+    assert plan.extract["features"]["destructive_ops"] == overrides["destructive_ops"]
+    assert {c["id"]: c["decision"] for c in plan.components}["s03"] == "必选"     # 沿用的判断真的进了选型

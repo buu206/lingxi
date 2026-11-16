@@ -210,8 +210,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("revise", help="产品循环③：新需求 → PRD 升版 → 重推方案 → 记录选型变化")
     sp.add_argument("workspace", help="工作区目录，如 out/<产品名>")
     sp.add_argument("requirement", help="新需求文本，或文件路径")
-    sp.add_argument("--no-plan", action="store_true", help="只升版 PRD 和记录，不重推方案")
-    sp.add_argument("--quick", action="store_true", help="只重跑需求拆解与选型（含特征复核，最多 3 次调用），不重做架构设计与审稿")
+    mode = sp.add_mutually_exclusive_group()     # --quick 本身就是一种重推方式，和 --no-plan 同时给是自相矛盾
+    mode.add_argument("--no-plan", action="store_true", help="只升版 PRD 和记录，不重推方案")
+    mode.add_argument("--quick", action="store_true", help="只重跑需求拆解与选型（含特征复核，最多 3 次调用），不重做架构设计与审稿")
     model_opts(sp)
     sp.set_defaults(func=cmd_revise)
 
@@ -236,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--real", action="store_true", help="用真实模型跑正向测试题并统计特征判断准确率")
     sp.add_argument("--real-audit", action="store_true", help="用真实模型（agent）跑反向检查测试题")
     sp.add_argument("--repeat", type=int, default=1, help="--real / --real-audit 时每题跑几次")
-    common(sp)
+    model_opts(sp)       # eval 不写输出目录、也不续跑：-o / --resume 收下了却不生效，不如不收
     sp.set_defaults(func=cmd_eval)
 
     return p

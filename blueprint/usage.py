@@ -23,7 +23,17 @@ def read_usage(ws: Path) -> dict:
         data = json.loads((ws / USAGE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         data = {}
-    out = {kind: {k: int((data.get(kind) or {}).get(k, 0) or 0) for k in _FIELDS} for kind in KINDS}
+    if not isinstance(data, dict):          # 合法 JSON 但不是对象（[]、"x"）同样当坏文件
+        data = {}
+
+    def num(kind: str, key: str) -> int:
+        entry = data.get(kind)
+        try:
+            return int((entry if isinstance(entry, dict) else {}).get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    out = {kind: {k: num(kind, k) for k in _FIELDS} for kind in KINDS}
     out["total"] = {k: sum(out[kind][k] for kind in KINDS) for k in _FIELDS}
     return out
 
@@ -37,4 +47,6 @@ def record_usage(ws: Path, kind: str, budget) -> None:
         for k in _FIELDS:
             usage[kind][k] += getattr(budget, k)
         data = {kind: usage[kind] for kind in KINDS}
-        (ws / USAGE_FILE).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # 原子替换：轮询读到一半写的文件会当成 0，写到一半崩溃会把累计用量清零
+        from blueprint.pipeline import atomic_write
+        atomic_write(ws / USAGE_FILE, json.dumps(data, ensure_ascii=False, indent=2) + "\n")

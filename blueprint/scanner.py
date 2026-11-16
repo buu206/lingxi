@@ -191,10 +191,12 @@ def scan_project(root: Path | str) -> Inventory:
                 if pat.search(rel) and len(acc_evidence[key]) < 8:
                     acc_evidence[key].append(rel)
                     break
-        if path.suffix not in TEXT_EXT:
-            continue
         try:
-            if path.stat().st_size > MAX_FILE_BYTES:
+            st = path.stat()
+            if path.suffix not in TEXT_EXT or st.st_size > MAX_FILE_BYTES:
+                # 不读内容的文件（.vue/.c/超大文件…）也要进指纹：agent 的 read_file 能读它们，
+                # 改了却不让 --resume 的缓存失效，就会沿用过期结论。按大小和修改时间记。
+                source_hash.update(json.dumps([rel, st.st_size, st.st_mtime_ns]).encode())
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:

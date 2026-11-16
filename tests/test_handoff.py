@@ -80,6 +80,24 @@ def test_renamed_env_files_are_treated_as_secrets(ws):
     assert not any("prod.env" in n for n in unzip(build_handoff(ws)))
 
 
+def test_credential_dirs_and_odd_venvs_are_not_packed(ws):
+    """回归：.aws/credentials、settings.env.local、名字不叫 venv 的虚拟环境曾被整个打进交接包。"""
+    sk = ws / "skeleton"
+    for rel in (".aws/credentials", ".ssh/config", "config/settings.env.local", "credentials",
+                "env/pyvenv.cfg", "env/lib/site.py", "py312/pyvenv.cfg", "py312/bin/python"):
+        (sk / rel).parent.mkdir(parents=True, exist_ok=True)
+        (sk / rel).write_text("secret", encoding="utf-8")
+    for rel in ("app/credentials.py", ".github/workflows/ci.yml", "config/settings.py"):
+        (sk / rel).parent.mkdir(parents=True, exist_ok=True)
+        (sk / rel).write_text("ok", encoding="utf-8")
+    names = {n.split("/skeleton/", 1)[1] for n in unzip(build_handoff(ws)) if "/skeleton/" in n}
+    for leaked in (".aws/credentials", ".ssh/config", "config/settings.env.local", "credentials",
+                   "env/pyvenv.cfg", "env/lib/site.py", "py312/bin/python"):
+        assert leaked not in names, leaked
+    for kept in ("app/credentials.py", ".github/workflows/ci.yml", "config/settings.py"):
+        assert kept in names, kept
+
+
 @pytest.mark.parametrize("name", ["A/B 助手", "../../evil"])
 def test_product_name_with_path_characters_stays_inside(tmp_path, name):
     ws = init_workspace(tmp_path, name, IDEA)
