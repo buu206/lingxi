@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -40,5 +42,39 @@ func TestParsePlanMatchesEngineShape(t *testing.T) {
 	}
 	if p.Layers[0].Num != "①" || p.ToolList[0].Name != "fetch_input" || p.ToolList[0].Permission != "allow" {
 		t.Fatalf("unexpected plan: %+v", p)
+	}
+}
+
+// 下载交接包不覆盖已有的同名文件。
+func TestUniquePathDoesNotOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	first := uniquePath(dir, "面包店-交接包.zip")
+	if err := os.WriteFile(first, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second := uniquePath(dir, "面包店-交接包.zip")
+	if second == first || filepath.Base(second) != "面包店-交接包 (2).zip" {
+		t.Fatalf("got %s", second)
+	}
+}
+
+// 引擎没了就别再无休止地轮询；还连着时容忍偶发失败。
+func TestGiveUpPolling(t *testing.T) {
+	job := &JobInfo{Status: "running"}
+	n := 0
+	if giveUpPolling(&n, "http://127.0.0.1:1", job) {
+		t.Fatal("一次失败不该放弃")
+	}
+	if !giveUpPolling(&n, "", job) || job.Status != "failed" || job.Error == "" {
+		t.Fatalf("引擎地址为空时应当放弃并写明原因：%+v", job)
+	}
+	n = 0
+	for i := 0; i < 14; i++ {
+		if giveUpPolling(&n, "http://x", &JobInfo{Status: "running"}) {
+			t.Fatalf("第 %d 次就放弃了", i+1)
+		}
+	}
+	if !giveUpPolling(&n, "http://x", &JobInfo{Status: "running"}) {
+		t.Fatal("连续 15 次失败应当放弃")
 	}
 }

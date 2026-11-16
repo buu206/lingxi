@@ -167,7 +167,7 @@ func productView(c *ui.Context) {
 							go app.downloadHandoffZip(selected)
 						})
 						action.ActionIcon(c, lucide.FolderOpen(), action.ActionIconProps{Title: "在 Finder 里打开工作区"}).OnClick(func() {
-							go revealProduct(app.engineURL, selected)
+							go revealProduct(app.baseURL(), selected)
 						})
 					})
 				}

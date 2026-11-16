@@ -61,35 +61,48 @@ func (s *AppState) startEngine(mock bool) {
 
 	// 引擎退出时把原因写进状态（窗口关了、引擎崩了都能在界面上看到）。
 	go func() {
-		if err := cmd.Wait(); err != nil {
-			fmt.Fprintf(os.Stderr, "[desktop] 引擎退出：%v\n", err)
-			s.mu.Lock()
-			if s.engineURL != "" { // 曾正常连上又退出才报退出原因，别覆盖「起不来」的原始报错
-				s.engineErr = "引擎退出了：" + err.Error()
-			}
-			s.engineURL = ""
-			s.mu.Unlock()
-			s.invalidate()
+		err := cmd.Wait()
+		reason := "正常退出"
+		if err != nil {
+			reason = err.Error()
 		}
+		fmt.Fprintf(os.Stderr, "[desktop] 引擎退出：%s\n", reason)
+		s.mu.Lock()
+		// 退出码 0 也算退出（之前只认报错，界面仍显示已连接）。
+		// 曾正常连上又退出才报退出原因，别覆盖「起不来」的原始报错。
+		if s.engineURL != "" && !s.quitting {
+			s.engineErr = "引擎退出了：" + reason
+		}
+		s.engineURL = ""
+		s.mu.Unlock()
+		s.invalidate()
 	}()
 
 	// 一条管道只有一个读者：用 TeeReader 把引擎日志透传到终端，同时扫端口行。
 	lines := make(chan string, 8)
 	go func() {
+		defer close(lines) // 管道读到头（引擎退出）就告诉下面别再等满 30 秒
 		sc := bufio.NewScanner(io.TeeReader(stdout, os.Stdout))
+		sc.Buffer(make([]byte, 0, 64<<10), 4<<20)
 		for sc.Scan() {
 			select {
 			case lines <- sc.Text():
 			default:
 			}
 		}
+		// 超长的一行会让 Scanner 停下；剩下的照样读走，否则管道写满，引擎的 print 会卡住
+		_, _ = io.Copy(os.Stdout, stdout)
 	}()
 	deadline := time.After(30 * time.Second)
 	var port string
 scan:
 	for {
 		select {
-		case line := <-lines:
+		case line, ok := <-lines:
+			if !ok {
+				s.failEngine("引擎刚启动就退出了，看终端里的报错（常见原因：依赖没装好、.venv 坏了）")
+				return
+			}
 			if m := startupLine.FindStringSubmatch(line); m != nil {
 				port = m[1]
 				break scan
@@ -146,6 +159,7 @@ func (s *AppState) setProcess(cmd *exec.Cmd) {
 func (s *AppState) stopEngine() {
 	s.mu.Lock()
 	cmd := s.engineCmd
+	s.quitting = true
 	s.mu.Unlock()
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
@@ -414,16 +428,40 @@ func downloadHandoff(base, slug string) (string, error) {
 	if st, err := os.Stat(outDir); err != nil || !st.IsDir() {
 		outDir = dir
 	}
-	path := filepath.Join(outDir, name)
-	f, err := os.Create(path)
+	// 先写到临时文件，完整收到再改名：中途失败不会留下半个 zip，也不会覆盖已有的同名文件。
+	name = filepath.Base(name) // 文件名来自响应头，不许带目录
+	tmp, err := os.CreateTemp(outDir, ".agent-handoff-*.part")
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	if _, err := io.Copy(f, resp.Body); err != nil {
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return "", fmt.Errorf("下载中断：%w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return "", err
+	}
+	path := uniquePath(outDir, name)
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		os.Remove(tmp.Name())
 		return "", err
 	}
 	return path, nil
+}
+
+// uniquePath 在 dir 里给 name 找一个还没被占用的路径：「x.zip」被占就用「x (2).zip」…
+func uniquePath(dir, name string) string {
+	ext := filepath.Ext(name)
+	stem := strings.TrimSuffix(name, ext)
+	path := filepath.Join(dir, name)
+	for i := 2; ; i++ {
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			return path
+		}
+		path = filepath.Join(dir, fmt.Sprintf("%s (%d)%s", stem, i, ext))
+	}
 }
 
 var filenameStar = regexp.MustCompile(`filename\*=UTF-8''([^;]+)`)
