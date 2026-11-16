@@ -102,6 +102,36 @@ def test_revise_reruns_plan_and_logs_component_diff(tmp_path):
     assert (ws / "方案.md").read_text(encoding="utf-8").count("# PRD 推导方案") == 1
 
 
+def test_revise_rolls_back_prd_when_replan_fails(tmp_path):
+    """回归：重推方案中途触发费用护栏时 PRD 已升版，重跑同一条 revise 又升一版（V1 → V3、需求出现两次）。"""
+    from blueprint.forward import run_plan
+    from blueprint.llm import BudgetExceeded
+
+    class FailAtReview(MockRunner):
+        def complete(self, stage, system, prompt, schema):
+            if stage == "review":
+                raise BudgetExceeded("已达到调用次数上限 1")
+            return super().complete(stage, system, prompt, schema)
+
+    ws = _init(tmp_path)
+    run_plan((ws / "PRD.md").read_text(encoding="utf-8"), MockRunner(), ws, log=quiet)
+    original = (ws / "PRD.md").read_text(encoding="utf-8")
+    plan_before = (ws / "plan.json").read_text(encoding="utf-8")
+    req = "新增：要审计每一次删除邮件的操作"
+    with pytest.raises(BudgetExceeded):
+        revise_workspace(ws, req, FailAtReview(), log=quiet)
+    assert (ws / "PRD.md").read_text(encoding="utf-8") == original
+    assert (ws / "plan.json").read_text(encoding="utf-8") == plan_before
+    assert not list((ws / "prd").glob("V1*"))                  # 这次新建的快照也撤掉
+    assert "V2 · 新需求" not in (ws / "迭代记录.md").read_text(encoding="utf-8")
+
+    result = revise_workspace(ws, req, MockRunner(), log=quiet)  # 重跑：只升一版，需求只出现一次
+    prd = (ws / "PRD.md").read_text(encoding="utf-8")
+    assert result["new_version"] == 2 and current_version(prd) == 2
+    assert "V3" not in prd and prd.count("### V2") == 1 and pending_versions(prd) == ["V2"]
+    assert sorted(p.name for p in (ws / "prd").iterdir()) == ["V1.md", "V1.plan.json"]
+
+
 def test_revise_without_plan_only_bumps_prd(tmp_path):
     ws = _init(tmp_path)
     result = revise_workspace(ws, "只记一下", None, run_plan_flag=False, log=quiet)

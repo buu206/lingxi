@@ -362,9 +362,28 @@ def revise_workspace(ws: Path, requirement: str, runner=None, run_plan_flag: boo
     if not requirement.strip():
         raise ValueError("新需求不能为空")
     before = load_components(ws)
-    undigested = pending_versions(read_prd(ws))
+    original = read_prd(ws)
+    undigested = pending_versions(original)
+    snapshots = [ws / HISTORY_DIR / f"V{current_version(original)}{ext}" for ext in (".md", ".plan.json")]
+    fresh = [p for p in snapshots if not p.exists()]
     old, new, prd_text = bump_prd(ws, requirement, source=source)
     log(f"PRD 已从 V{old} 升到 V{new}，旧版快照：{ws / HISTORY_DIR / f'V{old}.md'}")
+    try:
+        return _revise_after_bump(ws, requirement, runner, run_plan_flag, log, quick, warn_undigested, stabilize,
+                                  before, undigested, old, new, prd_text)
+    except BaseException:
+        # 重推方案失败（费用护栏、格式不合、接口报错、Ctrl+C）：PRD 退回原版本，删掉这次新建的快照，
+        # 否则重跑同一条 revise 会再升一版，同一条需求在 PRD 里出现两次。已完成的阶段缓存保留，重跑不重复计费。
+        atomic_write(ws / PRD_NAME, original)
+        for p in fresh:
+            p.unlink(missing_ok=True)
+        log(f"⚠️ 重推方案没完成，PRD 已退回 V{old}。重跑同一条 revise 命令即可，已完成的阶段不会重复计费。")
+        raise
+
+
+def _revise_after_bump(ws: Path, requirement: str, runner, run_plan_flag: bool, log: Callable[[str], None],
+                       quick: bool, warn_undigested: bool, stabilize: bool, before: dict[str, str],
+                       undigested: list[str], old: int, new: int, prd_text: str) -> dict:
 
     result = {"old_version": old, "new_version": new, "diff": [], "unknowns": 0, "doc": None,
               "undigested": undigested}

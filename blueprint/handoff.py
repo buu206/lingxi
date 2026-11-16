@@ -27,6 +27,23 @@ ROOT = Path(__file__).resolve().parent.parent
 REPO_URL = "https://github.com/hubooooooo/agent-workshop"
 _SKIP_PARTS = {".venv", "venv", "node_modules", "__pycache__", ".git", ".pytest_cache"}
 _SKIP_NAMES = {".env", ".DS_Store"}
+# 点开头的目录里多是本机配置或凭据（.aws/、.ssh/、.idea/…），只有 CI 配置值得交接。
+_KEEP_DOT_DIRS = {".github"}
+
+
+def _packable(skeleton: Path, rel: Path) -> bool:
+    """skeleton/ 里这个文件能不能放进交接包：不带环境、缓存和任何像凭据的东西。"""
+    dirs = rel.parts[:-1]
+    if _SKIP_PARTS & set(rel.parts) or rel.name in _SKIP_NAMES or is_secret(rel):
+        return False
+    if any(d.startswith(".") and d not in _KEEP_DOT_DIRS for d in dirs):
+        return False
+    name = rel.name.lower()
+    # settings.env.local、app.env.prod 这类改了名的环境文件；AWS 风格没扩展名的 credentials
+    if (".env" in name and name != ".env.example") or name == "credentials":
+        return False
+    # 任意名字的虚拟环境（env/、py312/…）：靠 pyvenv.cfg 认出来，整个目录不要
+    return not any((skeleton.joinpath(*dirs[:i + 1]) / "pyvenv.cfg").is_file() for i in range(len(dirs)))
 
 AI_PROMPT = """这个文件夹是一个 Agent 产品的交接包。提出想法的人不懂技术，需求和方案都在这里，请你帮忙把它做出来。请按顺序：
 
@@ -161,8 +178,7 @@ def _workspace_files(ws: Path) -> list[tuple[Path, str]]:
     if skeleton.is_dir():
         for p in sorted(skeleton.rglob("*")):
             rel = p.relative_to(skeleton)
-            if (p.is_file() and not p.is_symlink() and not (_SKIP_PARTS & set(rel.parts)) and p.name not in _SKIP_NAMES
-                    and not is_secret(rel)):
+            if p.is_file() and not p.is_symlink() and _packable(skeleton, rel):
                 files.append((p, f"skeleton/{rel.as_posix()}"))
     return [(p, arc) for p, arc in files if p.is_file()]
 

@@ -95,10 +95,16 @@ class AnthropicChat:
 
     def stream(self, prompt: str) -> Iterator[str]:
         self.runner.budget.check()
-        with self.runner.client.messages.stream(
-            model=self.runner.model, max_tokens=self.runner.max_tokens, system=self.system,
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
+        kwargs = dict(model=self.runner.model, max_tokens=self.runner.max_tokens, system=self.system,
+                      messages=[{"role": "user", "content": prompt}])
+        api = self.runner.client.messages
+        if not hasattr(api, "stream"):
+            # OpenAI 格式（API_FORMAT=openai）的适配器只实现了 create：整段拿回来，一次吐给界面。
+            resp = api.create(**kwargs)
+            self.runner.budget.record_usage("chat", getattr(resp, "usage", None))
+            yield "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+            return
+        with api.stream(**kwargs) as stream:
             yield from stream.text_stream
             usage = getattr(stream.get_final_message(), "usage", None)
         self.runner.budget.record_usage("chat", usage)
