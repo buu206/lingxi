@@ -106,3 +106,13 @@ def test_plan_job_records_usage_even_when_it_fails(tmp_path, monkeypatch):
     assert _wait(app.start_plan(res["slug"])).status == "done"
     usage = app.product(res["slug"])["usage"]
     assert usage["plan"]["calls"] > 2 and usage["total"] == usage["plan"]
+
+
+def test_non_object_usage_file_reads_as_zero_and_is_rewritten(tmp_path):
+    """回归：usage.json 是合法 JSON 但不是对象（[]）时 read_usage 抛 AttributeError，产品页 500。"""
+    for bad in ("[]", '"x"', '{"plan": [], "chat": {"calls": "many"}}'):
+        (tmp_path / USAGE_FILE).write_text(bad, encoding="utf-8")
+        assert read_usage(tmp_path)["total"]["calls"] == 0, bad
+    record_usage(tmp_path, "plan", _budget(2))
+    assert read_usage(tmp_path)["plan"]["calls"] == 2
+    assert not list(tmp_path.glob(".blueprint-*"))      # 原子写不留临时文件

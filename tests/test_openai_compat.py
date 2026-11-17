@@ -130,3 +130,18 @@ def test_write_env_switches_format_and_keeps_other_lines(tmp_path):
     providers.write_env("sk-ds", "deepseek-v4-flash", "https://api.deepseek.com/anthropic", path=env)
     data = providers.read_env(env)
     assert providers.current_config(data)["format"] == "anthropic" and "API_FORMAT" not in data
+
+
+def test_chat_stream_works_with_openai_client(monkeypatch):
+    """回归：「回答问题」「加新需求」的对话走 client.messages.stream，OpenAI 格式的客户端没有它，直接报错。"""
+    from blueprint.chat import AnthropicChat
+    for name, value in {"API_FORMAT": "openai", "OPENAI_API_KEY": "sk-oa-real-0123456789",
+                        "OPENAI_BASE_URL": "https://relay.example/v1", "MODEL_ID": ""}.items():
+        monkeypatch.setenv(name, value)
+    seen: list[dict] = []
+    runner = AnthropicRunner(budget=Budget(max_calls=4, max_tokens=60_000))
+    runner.client = _client([_reply({"role": "assistant", "content": "好的，再问一个问题。"})], seen)
+    chat = AnthropicChat(runner)
+    assert "".join(chat.stream("用户：我想加一个推送")) == "好的，再问一个问题。"
+    assert runner.budget.calls == 1 and runner.budget.output_tokens == 20
+    assert seen[0]["body"]["messages"][-1] == {"role": "user", "content": "用户：我想加一个推送"}

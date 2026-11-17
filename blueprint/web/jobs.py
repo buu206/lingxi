@@ -77,6 +77,10 @@ class JobManager:
             job = Job(id=str(next(self._ids)), kind=kind, slug=slug)
             self._jobs[job.id] = job
             self._latest[slug] = job.id
+            # 已经结束、又被同一产品的新任务顶替的旧任务没人再看：清掉，免得日志在进程里越积越多
+            keep = set(self._latest.values())
+            for old_id in [i for i, j in self._jobs.items() if i not in keep and j.status != "running"]:
+                del self._jobs[old_id]
         threading.Thread(target=self._run, args=(job, fn), daemon=True).start()
         return job
 

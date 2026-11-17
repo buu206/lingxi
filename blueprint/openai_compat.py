@@ -54,11 +54,12 @@ def to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
             if isinstance(content, str):
                 out.append({"role": "assistant", "content": content})
                 continue
-            msg: dict = {"role": "assistant", "content": _text_of(content) or None}
             calls = [{"id": _field(b, "id"), "type": "function",
                       "function": {"name": _field(b, "name"),
                                    "arguments": json.dumps(_field(b, "input", {}), ensure_ascii=False)}}
                      for b in content if _field(b, "type") == "tool_use"]
+            # 带工具调用时正文可以是 null；既没正文也没调用（思考模型常见）就得是空串，content=null 会被接口 400
+            msg: dict = {"role": "assistant", "content": _text_of(content) or (None if calls else "")}
             if calls:
                 msg["tool_calls"] = calls
             # DeepSeek 等思考模型在工具调用过程中要求把思考原样带回；只在接口给过时才带，官方 OpenAI 不会出现

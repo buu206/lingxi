@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -121,6 +122,32 @@ def _agent_turns(runner: Runner) -> int:
     return min(MAX_TURNS, budget.max_calls - budget.calls - AGENT_RESERVE_CALLS)
 
 
+OVERRIDES_FILE = "stages/feature_overrides.json"
+
+
+def remember_overrides(out_dir: Path, input_text: str, overrides: dict[str, dict]) -> None:
+    """revise 沿用上一版的特征判断时记下来：之后按提示跑 `plan --resume`，同一份 PRD 仍沿用这些判断。"""
+    if not overrides:
+        return
+    from blueprint.pipeline import atomic_write
+    path = Path(out_dir) / OVERRIDES_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256(input_text.encode("utf-8")).hexdigest()
+    atomic_write(path, json.dumps({"input_sha256": digest, "overrides": overrides}, ensure_ascii=False, indent=2))
+
+
+def recall_overrides(out_dir: Path, input_text: str) -> dict[str, dict] | None:
+    """只在输入和记下时完全相同才沿用；PRD 改过就重新判断。"""
+    try:
+        data = json.loads((Path(out_dir) / OVERRIDES_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("input_sha256") != hashlib.sha256(input_text.encode("utf-8")).hexdigest():
+        return None
+    overrides = data.get("overrides")
+    return overrides if isinstance(overrides, dict) and overrides else None
+
+
 def run_plan(input_text: str, runner: Runner, out_dir: Path, resume: bool = False,
              log: Callable[[str], None] = print,
              feature_overrides: dict[str, dict] | None = None) -> tuple[Plan, Path]:
@@ -134,6 +161,10 @@ def run_plan(input_text: str, runner: Runner, out_dir: Path, resume: bool = Fals
     input_text = derivation_text(input_text)     # 自动整理的 PRD 小节和模板说明都不当输入
     if not input_text.strip():
         raise ValueError("点子或 PRD 不能为空")
+    if feature_overrides is None and resume:
+        feature_overrides = recall_overrides(out_dir, input_text)
+    else:
+        remember_overrides(out_dir, input_text, feature_overrides or {})
     stages = StageRunner(runner, out_dir, resume=resume, log=log,
                          context={"kind": "plan", "input": input_text})
     stages.save("input.md", input_text)

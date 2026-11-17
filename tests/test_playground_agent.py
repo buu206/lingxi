@@ -171,3 +171,25 @@ def test_failure_after_cards_does_not_replay_the_turn():
     model = PlayModel([reply(use("lookup_menu", {"input": "面包"}, "t1")), RuntimeError("网络断了")])
     events = run(model)
     assert len(steps(events)) == 1 and "没有演完" in reply_text(events) and "离线演示" not in reply_text(events)
+
+
+def test_stopping_play_stops_agent_and_waits_for_usage():
+    """回归：点停止后后台 agent 还在一直调模型（最多 16 次），而用量只按停下那一刻记账。"""
+    import time
+
+    class CheckingRunner(ScriptRunner):
+        def step(self, stage, system, messages, tools):
+            self.budget.check()              # 真 runner 每次调用前都会先过费用护栏
+            time.sleep(0.05)
+            return super().step(stage, system, messages, tools)
+
+    model = PlayModel([])
+    model.runner = CheckingRunner([reply(use("lookup_menu", {"q": f"面包{i}"}, f"m{i}")) for i in range(10)]
+                                  + [say("都查完了")])
+    events = playground.play_events(PLAN, [chat.Message("user", "有什么面包？")], "# 面包店", model)
+    first = next(events)
+    assert first.get("name") == "play_step"
+    events.close()                           # 界面点了停止
+    calls = model.runner.budget.calls
+    time.sleep(0.3)
+    assert model.runner.budget.calls == calls <= 2   # 停下后不再发起新的调用，关闭时已等在途的那次回来

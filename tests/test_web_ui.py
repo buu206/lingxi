@@ -250,6 +250,23 @@ def test_http_rejects_foreign_host_origin_and_form_posts(server):
     assert exc.value.code == 415
 
 
+def test_http_bad_bodies_get_400_not_500_or_hang(server):
+    """回归：非 UTF-8 的请求体报 500；Content-Length 为负数时线程一直卡在 rfile.read(-1)。"""
+    import socket
+    srv, _base = server
+    port = srv.server_address[1]
+
+    def raw_post(length: str, body: bytes) -> bytes:
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
+            s.sendall(f"POST /api/products HTTP/1.0\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+                      f"Content-Length: {length}\r\n\r\n".encode() + body)
+            return s.recv(4096)
+
+    for length, body in (("4", b"\xff\xfe{}"), ("-1", b"{}"), ("abc", b"{}")):
+        head = raw_post(length, body).split(b"\r\n", 1)[0]
+        assert b" 400 " in head, (length, head)
+
+
 def test_http_static_and_api_404s(server):
     _srv, base = server
     assert call(base + "/static/..%2Fserver.py")[0] == 404
@@ -623,3 +640,14 @@ def test_one_running_audit_per_project_has_its_own_message():
     with pytest.raises(ValueError, match="正在检查中"):
         jobs.start("audit", "audit-x", lambda log: None)
     gate.set()
+
+
+def test_job_manager_drops_superseded_finished_jobs():
+    """回归：JobManager 从不清理，长时间开着界面时每个任务的日志都一直留在内存里。"""
+    jobs = JobManager()
+    first = wait_job(jobs.start("plan", "a", lambda log: None))
+    other = wait_job(jobs.start("plan", "b", lambda log: None))
+    second = wait_job(jobs.start("plan", "a", lambda log: None))
+    assert jobs.get(first.id) is None                       # 被同一产品的新任务顶替，清掉
+    assert jobs.get(second.id) is second and jobs.latest_for("a") is second
+    assert jobs.get(other.id) is other                      # 别的产品的最新任务保留
